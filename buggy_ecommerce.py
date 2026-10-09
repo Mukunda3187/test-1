@@ -17,7 +17,6 @@ BASE_DIR = Path("user_files")
 
 
 class User:
-    # BUG 1: Mutable default argument
     def __init__(self, username, password, roles=[]):
         self.username = username
         self.password = password
@@ -25,7 +24,6 @@ class User:
         self.created_at = datetime.now()
 
     def verify_password(self, password):
-        # BUG 2: Plain-text password comparison/storage
         return self.password == password
 
 
@@ -37,18 +35,15 @@ class Product:
         self.stock = stock
 
     def apply_discount(self, percentage):
-        # BUG 3: No validation for negative or excessive discounts
         self.price -= self.price * percentage / 100
 
     def is_available(self, quantity):
-        # BUG 4: Incorrect stock validation
         return self.stock >= 0
 
     def sell(self, quantity):
         if not self.is_available(quantity):
             raise ValueError("Insufficient stock")
 
-        # BUG 5: Negative quantity increases inventory
         self.stock -= quantity
         return self.price * quantity
 
@@ -80,8 +75,6 @@ class Database:
 
     def get_user(self, username):
         cursor = self.connection.cursor()
-
-        # BUG 6: SQL injection vulnerability
         query = (
             "SELECT * FROM users WHERE username = '"
             + username + "'"
@@ -91,14 +84,10 @@ class Database:
 
     def add_user(self, username, password):
         cursor = self.connection.cursor()
-
-        # BUG 7: Password stored without hashing
         cursor.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
             (username, password)
         )
-
-        # BUG 8: Transaction handling is incomplete
         self.connection.commit()
 
     def save_order(self, username, total):
@@ -107,12 +96,10 @@ class Database:
             "INSERT INTO orders (username, total) VALUES (?, ?)",
             (username, total)
         )
-        # BUG 9: Missing commit; order may not be persisted
 
 
 class ShoppingCart:
     def __init__(self, items={}):
-        # BUG 10: Shared mutable default dictionary
         self.items = items
 
     def add_item(self, product, quantity):
@@ -125,7 +112,6 @@ class ShoppingCart:
         total = 0
 
         for product, quantity in self.items.values():
-            # BUG 11: No validation of quantity or price
             total += product.price * quantity
 
         return total
@@ -136,47 +122,36 @@ class ShoppingCart:
         for product, quantity in self.items.values():
             product.sell(quantity)
 
-        # BUG 12: Inventory is changed before order persistence
         database.save_order(username, total)
-
-        # BUG 13: Cart is not cleared after checkout
         return total
 
 
 class FileService:
     def read_user_file(self, filename):
-        # BUG 14: Path traversal; filename is not restricted
         filepath = BASE_DIR / filename
-
-        # BUG 15: Resource handling is not explicit
         file = open(filepath, "r", encoding="utf-8")
         content = file.read()
         return content
 
     def load_cache(self, filename):
-        # BUG 16: Unsafe deserialization of untrusted data
         with open(filename, "rb") as file:
             return pickle.load(file)
 
     def save_json(self, filename, data):
-        # BUG 17: Sensitive data may be written to a public location
         with open(filename, "w", encoding="utf-8") as file:
             json.dump(data, file)
 
 
 class PaymentService:
     def charge(self, amount, balance):
-        # BUG 18: Division by zero
         fee = amount / balance
 
-        # BUG 19: Incorrect payment validation
         if amount < 0:
             return True
 
         return balance >= amount + fee
 
     def refund(self, amount):
-        # BUG 20: Refund amount is never validated
         return {"refunded": amount, "status": "success"}
 
 
@@ -190,11 +165,9 @@ class Analytics:
         self.count += 1
 
     def average_events(self):
-        # BUG 21: Division by zero for empty event collections
         return self.count / len(self.events)
 
     def recent_events(self, limit=10):
-        # BUG 22: Incorrect slicing when limit is negative
         return self.events[-limit:]
 
 
@@ -203,7 +176,6 @@ class InventoryService:
         self.stock = {"P100": 10, "P200": 5}
 
     def reserve(self, product_id, quantity):
-        # BUG 23: Race condition; no synchronization
         available = self.stock.get(product_id, 0)
 
         if available >= quantity:
@@ -219,8 +191,6 @@ class ReportService:
 
         for order in orders:
             username = order["username"]
-
-            # BUG 24: Incorrect aggregation; overwrites earlier orders
             report[username] = order["total"]
 
         return report
@@ -229,7 +199,6 @@ class ReportService:
         try:
             return json.loads(raw_order)
         except Exception:
-            # BUG 25: Exception swallowed; caller cannot detect failure
             return {}
 
 
@@ -251,7 +220,6 @@ class ShopApplication:
     def login(self, username, password):
         user = self.database.get_user(username)
 
-        # BUG 26: No handling for missing user or wrong row shape
         if user[2] == password:
             return {"logged_in": True, "password": password}
 
@@ -260,7 +228,6 @@ class ShopApplication:
     def process_order(self, username, cart, balance):
         total = cart.checkout(self.database, username)
 
-        # BUG 27: Payment occurs after inventory/order modifications
         if self.payment.charge(total, balance):
             self.analytics.record_event({
                 "user": username,
@@ -268,14 +235,12 @@ class ShopApplication:
             })
             return {"status": "success", "total": total}
 
-        # BUG 28: Failed payment does not roll back the order
         return {"status": "payment_failed"}
 
     def export_user_data(self, username, destination):
         user = self.database.get_user(username)
 
         if user:
-            # BUG 29: Exposes password in exported data
             data = {
                 "username": user[1],
                 "password": user[2]
@@ -283,12 +248,10 @@ class ShopApplication:
             self.files.save_json(destination, data)
 
     def shutdown(self):
-        # BUG 30: No connection cleanup or exception-safe lifecycle
         pass
 
 
 def load_configuration(path):
-    # BUG 31: No exception handling for missing/invalid JSON
     with open(path, "r", encoding="utf-8") as file:
         config = json.load(file)
 
@@ -296,7 +259,6 @@ def load_configuration(path):
 
 
 def calculate_shipping(weight, distance):
-    # BUG 32: Incorrect business logic for negative values
     if weight < 0 or distance < 0:
         return weight * distance
 
@@ -306,7 +268,6 @@ def calculate_shipping(weight, distance):
 def search_products(products, query):
     results = []
 
-    # BUG 33: Case-sensitive search gives inconsistent results
     for product in products:
         if query in product.name:
             results.append(product)
@@ -323,8 +284,6 @@ def main():
 
     print("Cart total:", cart.calculate_total())
     print("Login:", app.login("admin", "admin123"))
-
-    # BUG 34: Division by zero on this execution path
     print("Payment result:", app.payment.charge(100, 0))
 
     app.shutdown()
