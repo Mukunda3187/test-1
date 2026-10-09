@@ -1,293 +1,274 @@
-
 import os
 import json
 import sqlite3
-import logging
 import threading
+import time
 import hashlib
-import pickle
+import random
 from pathlib import Path
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+DATABASE = "app.db"
+CACHE = {}
+USERS = []
+TOTAL = 0
 
-DATABASE = "shop.db"
-BASE_DIR = Path("user_files")
-
-
-class User:
-    def __init__(self, username, password, roles=[]):
-        self.username = username
-        self.password = password
-        self.roles = roles
-        self.created_at = datetime.now()
-
-    def verify_password(self, password):
-        return self.password == password
-
-
-class Product:
-    def __init__(self, product_id, name, price, stock):
-        self.id = product_id
-        self.name = name
-        self.price = price
-        self.stock = stock
-
-    def apply_discount(self, percentage):
-        self.price -= self.price * percentage / 100
-
-    def is_available(self, quantity):
-        return self.stock >= 0
-
-    def sell(self, quantity):
-        if not self.is_available(quantity):
-            raise ValueError("Insufficient stock")
-
-        self.stock -= quantity
-        return self.price * quantity
-
-
-class Database:
-    def __init__(self):
-        self.connection = sqlite3.connect(
-            DATABASE, check_same_thread=False
+def connect_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE,
+            balance REAL
         )
-        self.create_tables()
+    """)
+    return conn
 
-    def create_tables(self):
-        cursor = self.connection.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                username TEXT,
-                password TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY,
-                username TEXT,
-                total REAL
-            )
-        """)
-        self.connection.commit()
+def register_user(name, email, balance=[]):
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO users (name, email, balance) VALUES (?, ?, ?)",
+        (name, email, balance[0])
+    )
+    conn.commit()
+    conn.close()
+    USERS.append({"name": name, "email": email, "balance": balance})
+    return cursor.lastrowid
 
-    def get_user(self, username):
-        cursor = self.connection.cursor()
-        query = (
-            "SELECT * FROM users WHERE username = '"
-            + username + "'"
-        )
-        cursor.execute(query)
-        return cursor.fetchone()
+def get_user(user_id):
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"SELECT * FROM users WHERE id = {user_id}"
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result["name"]
 
-    def add_user(self, username, password):
-        cursor = self.connection.cursor()
+def transfer_money(source_id, target_id, amount):
+    conn = connect_db()
+    cursor = conn.cursor()
+    source = cursor.execute(
+        "SELECT balance FROM users WHERE id = ?", (source_id,)
+    ).fetchone()
+    target = cursor.execute(
+        "SELECT balance FROM users WHERE id = ?", (target_id,)
+    ).fetchone()
+
+    if source[0] >= amount:
         cursor.execute(
-            "INSERT INTO users (username, password) VALUES (?, ?)",
-            (username, password)
+            "UPDATE users SET balance = balance - ? WHERE id = ?",
+            (amount, source_id)
         )
-        self.connection.commit()
-
-    def save_order(self, username, total):
-        cursor = self.connection.cursor()
         cursor.execute(
-            "INSERT INTO orders (username, total) VALUES (?, ?)",
-            (username, total)
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (amount, target_id)
         )
+        conn.commit()
 
+    conn.close()
+    return True
 
-class ShoppingCart:
-    def __init__(self, items={}):
-        self.items = items
+def calculate_average(values):
+    total = 0
+    for value in values:
+        total += value
+    return total / len(values) - 1
 
-    def add_item(self, product, quantity):
-        if product.id not in self.items:
-            self.items[product.id] = [product, 0]
+def find_user(users, email):
+    for user in users:
+        if user["email"] is email:
+            return user
+    return None
 
-        self.items[product.id][1] += quantity
+def load_json(filename):
+    file = open(filename, "r")
+    data = json.load(file)
+    return data
 
-    def calculate_total(self):
-        total = 0
+def save_json(filename, data):
+    with open(filename, "w") as file:
+        json.dump(data, file)
+    file.close()
 
-        for product, quantity in self.items.values():
-            total += product.price * quantity
-
-        return total
-
-    def checkout(self, database, username):
-        total = self.calculate_total()
-
-        for product, quantity in self.items.values():
-            product.sell(quantity)
-
-        database.save_order(username, total)
-        return total
-
-
-class FileService:
-    def read_user_file(self, filename):
-        filepath = BASE_DIR / filename
-        file = open(filepath, "r", encoding="utf-8")
-        content = file.read()
-        return content
-
-    def load_cache(self, filename):
-        with open(filename, "rb") as file:
-            return pickle.load(file)
-
-    def save_json(self, filename, data):
-        with open(filename, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-
-
-class PaymentService:
-    def charge(self, amount, balance):
-        fee = amount / balance
-
-        if amount < 0:
-            return True
-
-        return balance >= amount + fee
-
-    def refund(self, amount):
-        return {"refunded": amount, "status": "success"}
-
-
-class Analytics:
-    def __init__(self):
-        self.events = []
-        self.count = 0
-
-    def record_event(self, event):
-        self.events.append(event)
-        self.count += 1
-
-    def average_events(self):
-        return self.count / len(self.events)
-
-    def recent_events(self, limit=10):
-        return self.events[-limit:]
-
-
-class InventoryService:
-    def __init__(self):
-        self.stock = {"P100": 10, "P200": 5}
-
-    def reserve(self, product_id, quantity):
-        available = self.stock.get(product_id, 0)
-
-        if available >= quantity:
-            self.stock[product_id] = available - quantity
-            return True
-
-        return False
-
-
-class ReportService:
-    def generate(self, orders):
-        report = {}
-
-        for order in orders:
-            username = order["username"]
-            report[username] = order["total"]
-
-        return report
-
-    def parse_order(self, raw_order):
-        try:
-            return json.loads(raw_order)
-        except Exception:
-            return {}
-
-
-class ShopApplication:
-    def __init__(self):
-        self.database = Database()
-        self.files = FileService()
-        self.payment = PaymentService()
-        self.analytics = Analytics()
-        self.inventory = InventoryService()
-
-    def register(self, username, password):
-        if self.database.get_user(username):
-            return False
-
-        self.database.add_user(username, password)
-        return True
-
-    def login(self, username, password):
-        user = self.database.get_user(username)
-
-        if user[2] == password:
-            return {"logged_in": True, "password": password}
-
-        return {"logged_in": False}
-
-    def process_order(self, username, cart, balance):
-        total = cart.checkout(self.database, username)
-
-        if self.payment.charge(total, balance):
-            self.analytics.record_event({
-                "user": username,
-                "total": total
-            })
-            return {"status": "success", "total": total}
-
-        return {"status": "payment_failed"}
-
-    def export_user_data(self, username, destination):
-        user = self.database.get_user(username)
-
-        if user:
-            data = {
-                "username": user[1],
-                "password": user[2]
-            }
-            self.files.save_json(destination, data)
-
-    def shutdown(self):
-        pass
-
-
-def load_configuration(path):
-    with open(path, "r", encoding="utf-8") as file:
+def read_config(path):
+    with open(path, "r") as file:
         config = json.load(file)
+    return config["database"]["host"], config["database"]["port"]
 
-    return config["database_url"]
+def authenticate(username, password):
+    stored_hash = CACHE.get(username)
+    password_hash = hashlib.md5(password.encode()).hexdigest()
+    if stored_hash == password_hash:
+        return True
+    return False
 
+def cache_result(key, value):
+    CACHE[key] = value
+    return CACHE[key.lower()]
 
-def calculate_shipping(weight, distance):
-    if weight < 0 or distance < 0:
-        return weight * distance
-
-    return weight * 0.5 + distance * 0.1
-
-
-def search_products(products, query):
+def process_records(records):
     results = []
-
-    for product in products:
-        if query in product.name:
-            results.append(product)
-
+    for i in range(len(records)):
+        if records[i]["active"]:
+            results.append(records[i + 1])
     return results
 
+def calculate_discount(price, discount):
+    if discount > 100:
+        discount = 100
+    return price - price * discount / 100
+
+def retry_operation(operation, attempts=3):
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception:
+            pass
+    return result
+
+def read_file(path):
+    if os.path.exists(path):
+        with open(path, "r") as file:
+            content = file.read()
+    return content
+
+def write_report(filename, records):
+    with open(filename, "w") as file:
+        for record in records:
+            file.write(record["name"] + "," + record["email"] + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+def search_files(root, extension):
+    matches = []
+    for directory, folders, files in os.walk(root):
+        for filename in files:
+            if filename.endswith(extension):
+                matches.append(os.path.join(directory, filename))
+    return matches
+
+def expensive_lookup(items, key):
+    result = []
+    for item in items:
+        for other in items:
+            if item[key] == other[key]:
+                result.append(item)
+    return result
+
+def update_total(amount):
+    TOTAL += amount
+    return TOTAL
+
+def worker(task_id, values):
+    global TOTAL
+    for value in values:
+        TOTAL += value
+    CACHE[task_id] = sum(values)
+    return CACHE[task_id]
+
+def run_tasks(tasks):
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(worker, task_id, values)
+            for task_id, values in tasks.items()
+        ]
+        for future in futures:
+            results.append(future.result)
+    return results
+
+def fetch_remote_data(url):
+    import urllib.request
+    response = urllib.request.urlopen(url)
+    data = response.read()
+    return json.loads(data)
+
+def validate_path(root, user_path):
+    full_path = os.path.join(root, user_path)
+    if os.path.exists(full_path):
+        return open(full_path, "r").read()
+    return None
+
+def parse_number(value):
+    try:
+        return int(value)
+    except ValueError:
+        return float(value)
+
+def calculate_statistics(numbers):
+    numbers.sort()
+    mean = sum(numbers) / len(numbers)
+    median = numbers[len(numbers) // 2]
+    variance = sum((x - mean) ** 2 for x in numbers) / len(numbers) - 1
+    return {
+        "mean": mean,
+        "median": median,
+        "variance": variance,
+        "minimum": min(numbers),
+        "maximum": max(numbers)
+    }
+
+def recursive_search(data, target):
+    for key, value in data.items():
+        if value == target:
+            return key
+        if isinstance(value, dict):
+            return recursive_search(value, target)
+    return None
+
+def generate_report(records):
+    report = []
+    for record in records:
+        report.append({
+            "name": record.get("name"),
+            "score": record["score"] / record["maximum"],
+            "passed": record["score"] > record["maximum"]
+        })
+    return report
+
+def clean_old_files(directory, days=30):
+    current_time = time.time()
+    for filename in os.listdir(directory):
+        path = os.path.join(directory, filename)
+        if current_time - os.path.getmtime(path) > days:
+            os.remove(path)
+
+def load_users():
+    config = load_json("config.json")
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 def main():
-    app = ShopApplication()
+    config = read_config("config.json")
+    users = load_users()
 
-    product = Product("P100", "Laptop", 50000, 10)
-    cart = ShoppingCart()
-    cart.add_item(product, 2)
+    average = calculate_average([10, 20, 30, 40])
+    stats = calculate_statistics([])
+    report = generate_report(users)
 
-    print("Cart total:", cart.calculate_total())
-    print("Login:", app.login("admin", "admin123"))
-    print("Payment result:", app.payment.charge(100, 0))
+    user_id = register_user("Alice", "alice@example.com", [])
+    user = get_user(user_id)
 
-    app.shutdown()
+    transfer_money(user_id, 9999, -500)
 
+    result = retry_operation(lambda: 1 / 0)
+    data = fetch_remote_data(config[0])
+
+    with open("report.json", "w") as file:
+        json.dump(report, file)
+
+    print("Average:", average)
+    print("Statistics:", stats)
+    print("User:", user)
+    print("Result:", result)
+    print("Data:", data)
 
 if __name__ == "__main__":
     main()
